@@ -1,41 +1,28 @@
 const { ChatSession, Message, KnowledgeBase, User } = require('../models');
 const { Op } = require('sequelize');
 
-// --- ¡NUEVA CONFIGURACIÓN DE IA! ---
 const OpenAI = require('openai');
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY, // Lee la clave del .env
+  apiKey: process.env.OPENAI_API_KEY,
 });
-// --- FIN DE LA NUEVA CONFIGURACIÓN ---
 
-
-/**
- * ESTA ES LA NUEVA LÓGICA DE IA GENERATIVA (con OpenAI)
- */
 async function getBotResponse(userMessage, userId, chatId) {
   try {
-    // 1. OBTENER CONTEXTO (USUARIO, HISTORIAL, BASE DE CONOCIMIENTO)
     
-    // Contexto del Usuario
     const user = await User.findByPk(userId);
     const babyAge = user.babyAgeMonths || 'edad no especificada';
 
-    // Contexto del Historial (Memoria)
     const dbHistoryMessages = await Message.findAll({
       where: { chatSessionId: chatId },
       order: [['createdAt', 'ASC']],
       limit: 20,
     });
-
-    // Contexto de la Base de Conocimiento (Reglas del Negocio)
     const allKnowledge = await KnowledgeBase.findAll();
     const formattedKnowledge = allKnowledge.map(entry => {
       return `- Si la pregunta trata sobre [${entry.keywords.join(', ')}], responde con: "${entry.response}" (Rango de edad: ${entry.ageMinMonths}-${entry.ageMaxMonths} meses)\n`;
     }).join('\n---\n');
 
-    // 2. CONSTRUIR EL "MEGA-PROMPT" PARA OPENAI
     
-    // Este es el "Cerebro" o "Constitución" del bot
     const systemPrompt = `
 # ROL Y PERSONALIDAD
 Eres "ANMI" (Asistente Nutricional Materno Infantil). Actúas COMO UN NUTRICIONISTA PEDIÁTRICO experto. Eres amigable, empático, profesional y tu objetivo es combatir la anemia infantil.
@@ -57,32 +44,24 @@ ${formattedKnowledge}
 ---
 `;
 
-    // 3. CONSTRUIR EL HISTORIAL PARA LA API
-    // OpenAI funciona mejor con un historial de mensajes estructurado
     const messagesForAPI = [
       { role: 'system', content: systemPrompt }
     ];
 
-    // Añadimos el historial de la base de datos
     dbHistoryMessages.forEach(msg => {
       if (msg.sender === 'USER') {
         messagesForAPI.push({ role: 'user', content: msg.content });
       } else {
-        // Asumimos que los mensajes 'BOT' son del 'assistant'
         messagesForAPI.push({ role: 'assistant', content: msg.content });
       }
     });
 
-    // Añadimos la nueva pregunta del usuario
     messagesForAPI.push({ role: 'user', content: userMessage });
-
-
-    // 4. LLAMAR A LA IA Y DEVOLVER LA RESPUESTA
     
     console.log("[IA Logic] Enviando prompt a OpenAI (ChatGPT)...");
     
     const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo", // El modelo más rápido y popular
+      model: "gpt-3.5-turbo",
       messages: messagesForAPI,
     });
 
@@ -95,8 +74,6 @@ ${formattedKnowledge}
     return "Lo siento, tuve un problema al procesar tu solicitud. La IA no pudo responder.";
   }
 }
-
-// --- CONTROLADORES DE RUTAS (sin cambios) ---
 
 exports.createChatSession = async (req, res) => {
   try {

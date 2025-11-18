@@ -1,7 +1,7 @@
-const { ChatSession, Message, KnowledgeBase, User } = require('../models');
-const { Op } = require('sequelize');
-
+const { ChatSession, Message, User } = require('../models');
+const { buildKnowledgeInstruction } = require('../utils/knowledgePromptBuilder');
 const OpenAI = require('openai');
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -9,67 +9,91 @@ const openai = new OpenAI({
 async function getBotResponse(userMessage, userId, chatId) {
   try {
     const user = await User.findByPk(userId);
-    const babyAge = user.babyAgeMonths || 0;
+    const babyAge = user?.babyAgeMonths || 0;
 
-    const knowledgeData = await KnowledgeBase.findAll();
+    // Historial de chat (últimos 20 mensajes)
+    const dbHistoryMessages = await Message.findAll({
+      where: { chatSessionId: chatId },
+      order: [['createdAt', 'ASC']],
+      limit: 20,
+    });
 
-    // 1️⃣ Detectar emergencias
-    if (isEmergencyMessage(userMessage)) {
+    // Obtener instrucciones desde knowledgeData basadas en keywords
+    const knowledgeInstructions = buildKnowledgeInstruction(userMessage, babyAge);
+
+    // Palabras de emergencia
+    const emergencyKeywords = ["fiebre", "vomito", "vómito", "diarrea", "letargo", "convulsion", "convulsión", "no quiere comer"];
+    const isEmergency = emergencyKeywords.some(kw =>
+      userMessage.toLowerCase().includes(kw)
+    );
+
+    if (isEmergency) {
       return "Si tu bebé tiene fiebre alta, vómitos, diarrea o no quiere comer, esto podría ser una señal de emergencia. Mi información no puede ayudarte con esto. Por favor, busca atención médica de inmediato.";
     }
 
-    // 2️⃣ Buscar coincidencia en la base
-    const matched = searchKnowledgeBase(userMessage, babyAge, knowledgeData);
+    // ---------- PROMPT PRINCIPAL ----------
+    let systemPrompt = `
+Eres ANMI, un asistente cálido especializado en nutrición infantil y prevención de anemia.
+Reglas estrictas:
+- NO uses nada de Markdown.
+- NO inventes datos nuevos.
+- Usa emojis siempre.
+- No des diagnósticos.
+- Edad del bebé: ${babyAge} meses.
 
-    if (matched) {
-      return matched + `
----
-Recuerda: Esta información es referencial y no reemplaza la consulta y evaluación personalizada con un pediatra o nutricionista.
-`;
+Si existen instrucciones oficiales desde la base de conocimientos, DEBES seguirlas exactamente.
+    `;
+
+    if (knowledgeInstructions) {
+      systemPrompt += `
+Instrucciones oficiales encontradas:
+${knowledgeInstructions}
+      `;
+    } else {
+      systemPrompt += `
+No se encontraron coincidencias de conocimiento. Responde igual con tono cálido, dentro del dominio de nutrición infantil, sin inventar información médica.
+      `;
     }
 
-    // 3️⃣ Si no encuentra, usar IA (pero restringida)
-    const systemPrompt = `
-Eres ANMI, Asistente Nutricional Materno Infantil.
+    // ---------- Construcción del historial ----------
+    const messagesForAPI = [{ role: "system", content: systemPrompt }];
 
-REGLAS:
-- Si no existe coincidencia en la base de conocimiento, solo puedes responder con información general de nutrición infantil (no médica).
-- No inventes información técnica.
-- El objetivo es combatir la anemia infantil.
-- Siempre incluye el disclaimer al final.
-
-BASE DE CONOCIMIENTO DISPONIBLE:
-${knowledgeData.map(k => `- Keywords: ${k.keywords.join(', ')} → Respuesta: ${k.response} (Edad ${k.ageMinMonths}-${k.ageMaxMonths})`).join('\n')}
-`;
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage }
-      ],
+    dbHistoryMessages.forEach(msg => {
+      messagesForAPI.push({
+        role: msg.sender === "USER" ? "user" : "assistant",
+        content: msg.content
+      });
     });
 
-    return completion.choices[0].message.content + `
----
-Recuerda: Esta información es referencial y no reemplaza la consulta y evaluación personalizada con un pediatra o nutricionista.
-`;
+    messagesForAPI.push({ role: "user", content: userMessage });
 
-  } catch (err) {
-    console.error("Error IA:", err);
-    return "Ocurrió un error procesando tu solicitud. Inténtalo nuevamente.";
+    // ---------- Llamada al modelo ----------
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: messagesForAPI,
+    });
+
+    return completion.choices[0].message.content;
+
+  } catch (error) {
+    console.error("Error IA:", error);
+    return "Hubo un problema procesando tu solicitud.";
   }
 }
+
+// ------------------------------
+// CONTROLADORES
+// ------------------------------
 
 exports.createChatSession = async (req, res) => {
   try {
     const newChat = await ChatSession.create({
       userId: req.user.id,
-      title: (req.body && req.body.title) || 'Nuevo Chat',
+      title: req.body?.title || "Nuevo Chat",
     });
     res.status(201).json(newChat);
   } catch (error) {
-    res.status(500).json({ message: 'Error al crear el chat.', error: error.message });
+    res.status(500).json({ message: "Error al crear chat.", error: error.message });
   }
 };
 
@@ -81,7 +105,7 @@ exports.getUserChats = async (req, res) => {
     });
     res.status(200).json(chats);
   } catch (error) {
-    res.status(500).json({ message: 'Error al obtener chats.', error: error.message });
+    res.status(500).json({ message: "Error al obtener chats.", error: error.message });
   }
 };
 
@@ -89,18 +113,19 @@ exports.getChatMessages = async (req, res) => {
   try {
     const chatId = req.params.chatId;
 
-    const chat = await ChatSession.findOne({ where: { id: chatId, userId: req.user.id }});
-    if (!chat) {
-      return res.status(404).json({ message: 'Chat no encontrado o no te pertenece.' });
-    }
+    const chat = await ChatSession.findOne({
+      where: { id: chatId, userId: req.user.id },
+    });
+    if (!chat) return res.status(404).json({ message: "Chat no encontrado." });
 
     const messages = await Message.findAll({
       where: { chatSessionId: chatId },
       order: [['createdAt', 'ASC']],
     });
+
     res.status(200).json(messages);
   } catch (error) {
-    res.status(500).json({ message: 'Error al obtener mensajes.', error: error.message });
+    res.status(500).json({ message: "Error al obtener mensajes.", error: error.message });
   }
 };
 
@@ -109,29 +134,28 @@ exports.postMessage = async (req, res) => {
     const chatId = req.params.chatId;
     const { content } = req.body;
 
-    const chat = await ChatSession.findOne({ where: { id: chatId, userId: req.user.id }});
-    if (!chat) {
-      return res.status(404).json({ message: 'Chat no encontrado o no te pertenece.' });
-    }
+    const chat = await ChatSession.findOne({
+      where: { id: chatId, userId: req.user.id },
+    });
+    if (!chat) return res.status(404).json({ message: "Chat no encontrado." });
 
     await Message.create({
       chatSessionId: chatId,
-      sender: 'USER',
-      content: content,
+      sender: "USER",
+      content,
     });
 
     const botResponseContent = await getBotResponse(content, req.user.id, chatId);
 
     const botMessage = await Message.create({
       chatSessionId: chatId,
-      sender: 'BOT',
+      sender: "BOT",
       content: botResponseContent,
     });
 
     res.status(201).json(botMessage);
-
   } catch (error) {
-    console.error('Error al postear mensaje:', error);
-    res.status(500).json({ message: 'Error al enviar el mensaje.', error: error.message });
+    console.error("Error al enviar mensaje:", error);
+    res.status(500).json({ message: "Error al enviar.", error: error.message });
   }
 };

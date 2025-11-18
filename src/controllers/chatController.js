@@ -8,70 +8,56 @@ const openai = new OpenAI({
 
 async function getBotResponse(userMessage, userId, chatId) {
   try {
-    
     const user = await User.findByPk(userId);
-    const babyAge = user.babyAgeMonths || 'edad no especificada';
+    const babyAge = user.babyAgeMonths || 0;
 
-    const dbHistoryMessages = await Message.findAll({
-      where: { chatSessionId: chatId },
-      order: [['createdAt', 'ASC']],
-      limit: 20,
-    });
-    const allKnowledge = await KnowledgeBase.findAll();
-    const formattedKnowledge = allKnowledge.map(entry => {
-      return `- Si la pregunta trata sobre [${entry.keywords.join(', ')}], responde con: "${entry.response}" (Rango de edad: ${entry.ageMinMonths}-${entry.ageMaxMonths} meses)\n`;
-    }).join('\n---\n');
+    const knowledgeData = await KnowledgeBase.findAll();
 
-    
+    // 1️⃣ Detectar emergencias
+    if (isEmergencyMessage(userMessage)) {
+      return "Si tu bebé tiene fiebre alta, vómitos, diarrea o no quiere comer, esto podría ser una señal de emergencia. Mi información no puede ayudarte con esto. Por favor, busca atención médica de inmediato.";
+    }
+
+    // 2️⃣ Buscar coincidencia en la base
+    const matched = searchKnowledgeBase(userMessage, babyAge, knowledgeData);
+
+    if (matched) {
+      return matched + `
+---
+Recuerda: Esta información es referencial y no reemplaza la consulta y evaluación personalizada con un pediatra o nutricionista.
+`;
+    }
+
+    // 3️⃣ Si no encuentra, usar IA (pero restringida)
     const systemPrompt = `
-# ROL Y PERSONALIDAD
-Eres "ANMI" (Asistente Nutricional Materno Infantil). Actúas COMO UN NUTRICIONISTA PEDIÁTRICO experto. Eres amigable, empático, profesional y tu objetivo es combatir la anemia infantil.
+Eres ANMI, Asistente Nutricional Materno Infantil.
 
-# CONTEXTO DEL USUARIO ACTUAL
-- Edad del bebé: ${babyAge} meses.
+REGLAS:
+- Si no existe coincidencia en la base de conocimiento, solo puedes responder con información general de nutrición infantil (no médica).
+- No inventes información técnica.
+- El objetivo es combatir la anemia infantil.
+- Siempre incluye el disclaimer al final.
 
-# REGLAS ÉTICAS FUNDAMENTALES (¡OBLIGATORIO CUMPLIR!)
-1.  **PRIORIDAD DE EMERGENCIA:** Si el usuario menciona síntomas graves (fiebre, vómitos, diarrea, no come, decaído, etc.), TU ÚNICA RESPUESTA debe ser: "Si tu bebé tiene fiebre alta, vómitos, diarrea o no quiere comer, esto podría ser una señal de emergencia. Mi información no puede ayudarte con esto. Por favor, busca atención médica de inmediato."
-2.  **ACTÚA COMO NUTRICIONISTA:** El usuario quiere que le des consejos, dietas y proporciones. PUEDES y DEBES hacerlo, ya que eres el experto.
-3.  **EL DISCLAIMER ES OBLIGATORIO:** Al final de CADA RESPUESTA que generes, DEBES añadir estas líneas exactas:
-    ---
-    Recuerda: Esta información es referencial y no reemplaza la consulta y evaluación personalizada con un pediatra o nutricionista.
-
-# BASE DE CONOCIMIENTO (Prioriza esta información)
-Usa esta información verificada (basada en MINSA/OMS) como tu fuente principal de verdad:
----
-${formattedKnowledge}
----
+BASE DE CONOCIMIENTO DISPONIBLE:
+${knowledgeData.map(k => `- Keywords: ${k.keywords.join(', ')} → Respuesta: ${k.response} (Edad ${k.ageMinMonths}-${k.ageMaxMonths})`).join('\n')}
 `;
 
-    const messagesForAPI = [
-      { role: 'system', content: systemPrompt }
-    ];
-
-    dbHistoryMessages.forEach(msg => {
-      if (msg.sender === 'USER') {
-        messagesForAPI.push({ role: 'user', content: msg.content });
-      } else {
-        messagesForAPI.push({ role: 'assistant', content: msg.content });
-      }
-    });
-
-    messagesForAPI.push({ role: 'user', content: userMessage });
-    
-    console.log("[IA Logic] Enviando prompt a OpenAI (ChatGPT)...");
-    
     const completion = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
-      messages: messagesForAPI,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage }
+      ],
     });
 
-    const text = completion.choices[0].message.content;
-    
-    return text;
+    return completion.choices[0].message.content + `
+---
+Recuerda: Esta información es referencial y no reemplaza la consulta y evaluación personalizada con un pediatra o nutricionista.
+`;
 
-  } catch (error) {
-    console.error("Error al contactar a la IA Generativa (OpenAI):", error);
-    return "Lo siento, tuve un problema al procesar tu solicitud. La IA no pudo responder.";
+  } catch (err) {
+    console.error("Error IA:", err);
+    return "Ocurrió un error procesando tu solicitud. Inténtalo nuevamente.";
   }
 }
 

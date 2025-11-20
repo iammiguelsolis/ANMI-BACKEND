@@ -78,6 +78,8 @@ No se encontraron coincidencias de conocimiento. Responde igual con tono cálido
       messages: messagesForAPI,
     });
 
+    console.log(completion.choices[0].message.content);
+
     return completion.choices[0].message.content;
 
   } catch (error) {

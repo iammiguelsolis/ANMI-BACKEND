@@ -10,7 +10,7 @@ async function getBotResponse(userMessage, userId, chatId) {
   try {
     const user = await User.findByPk(userId);
     const babyAge = user?.babyAgeMonths || 0;
-
+    console.log("3");
     // Historial de chat (últimos 20 mensajes)
     const dbHistoryMessages = await Message.findAll({
       where: { chatSessionId: chatId },
@@ -78,7 +78,7 @@ No se encontraron coincidencias de conocimiento. Responde igual con tono cálido
       messages: messagesForAPI,
     });
 
-    console.log(completion.choices[0].message.content);
+    console.log("1");
 
     return completion.choices[0].message.content;
 

@@ -81,7 +81,12 @@ No se encontraron coincidencias de conocimiento. Responde igual con tono cálido
     console.log("User: ", userMessage);
     console.log("Bot: ", + completion.choices[0].message.content);
 
-    return completion.choices[0].message.content;
+    let finalResponse = completion.choices[0].message.content;
+
+    // Agregar mensaje de seguridad siempre al final
+    finalResponse += "\n\nRecuerda que esta información no reemplaza la evaluación de un médico. Si notas algo preocupante, consulta con un profesional de salud. 🩺";
+
+    return finalResponse;
 
   } catch (error) {
     console.error("Error IA:", error);
